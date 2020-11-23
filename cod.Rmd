@@ -1,0 +1,371 @@
+rm(list=ls())
+options(java.parameters = "-Xmx8G")
+
+library(openxlsx)
+library(sqldf)
+library(TTR)
+library(dplyr)
+library(reshape)
+library(gtools)
+
+#Setting working directory to HadoopDir
+setwd("C:\\Users\\srsripad\\Documents\\Srinath\\Documents\\CISCO\\Deferral-Release\\BE Allocation\\Production\\Desktop prod_Dummy\\Nov'20_Test")
+
+#SalesLevel Mapping
+SL2_Mapping=read.xlsx("SL2_Mapping.xlsx")
+
+period= read.xlsx("Deferral_Data.xlsx",sheet="period")
+
+Month = period$FISCAL_MONTH
+
+Forecast_Quarter = period$FISCAL_QUARTER
+
+#Import NRS Data
+FINBO_NRS=read.xlsx("FINBO_NRS_GSP.xlsx")
+FINBO_NRS=subset(FINBO_NRS,BE != 'SP Video Software and Solutions')
+FINBO_NRS=subset(FINBO_NRS,Quarter>= '2018Q1')
+FINBO_NRS$LOA="TBA"
+FINBO_NRS <- FINBO_NRS[c(6,1,2,3,4,5)]
+
+#Extraction of TBA FINBO Net Deferral data
+PF_TBA= read.xlsx("Deferral_Data.xlsx",sheet="PF_TBA")
+
+PF_TBA$LOA="TBA"
+
+PF_MBA= read.xlsx("Deferral_Data.xlsx",sheet="PF_MBA")
+
+PF_MBA$LOA="MBA"
+
+PF=rbind(PF_TBA,PF_MBA)
+
+PF$Quarter=paste(substr(PF$Quarter,1,4),'Q',substr(PF$Quarter,5,5),sep = "")
+
+PF=subset(PF,BE != 'SP Video Software and Solutions')
+PF=subset(PF,Saleslevel != 'GLOBAL SERVICE PROVIDER')
+WW=subset(PF,Saleslevel == 'WW Distribution')
+names(WW)[names(WW) == 'Saleslevel3'] <- 'Saleslevel2'
+PF=subset(PF,PF !='DVIR')
+PF=subset(PF,Saleslevel != 'WW Distribution')
+PF$Saleslevel2 = ifelse(PF$Saleslevel3=='AMER SP - AMERICAS'|PF$Saleslevel3=='AMER SP - EMEAR'|PF$Saleslevel3=='AMER SP - APJC'|
+                          PF$Saleslevel3=='APJ SP - APJC'|PF$Saleslevel3=='APJ SP - EMEAR'|PF$Saleslevel3=='APJ SP - AMERICAS'|
+                          PF$Saleslevel3=='EMEAR SP - EMEAR'|PF$Saleslevel3=='EMEAR SP - AMERICAS'|PF$Saleslevel3=='EMEAR SP - APJC','GSP','Non GSP')
+
+netdeferral =sqldf("select LOA,Saleslevel,Saleslevel2,BE,Quarter,sum(Netdeferral) as Netdeferral from PF     group by 1,2,3,4,5")
+
+Netdeferral =rbind(FINBO_NRS,netdeferral)
+
+dummy1 = unique(subset(Netdeferral,select=c(LOA,Saleslevel,Saleslevel2,Quarter)))
+dummy2 = unique(subset(Netdeferral,select=c(LOA,Saleslevel,Saleslevel2,BE)))
+dummy = sqldf("select a.*,b.Quarter from dummy2 as a,dummy1 as b where a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2 and a.LOA=b.LOA")
+
+Netdeferral = sqldf("select a.*,b.Netdeferral from dummy as a
+                    left join Netdeferral as b on a.Saleslevel=b.Saleslevel and a.BE=b.BE and a.Quarter=b.Quarter and a.Saleslevel2=b.Saleslevel2 and a.LOA=b.LOA")
+Netdeferral$Netdeferral[is.na(Netdeferral$Netdeferral)] <- 0
+Netdeferral_Sl1 = sqldf("select LOA,Saleslevel,Saleslevel2,Quarter,sum(Netdeferral) as netdeferral_sl from Netdeferral where BE !='Other'
+                        group by 1,2,3,4")
+Netdeferral1 = sqldf("select a.*,b.netdeferral_sl from Netdeferral as a,Netdeferral_Sl1 as b
+                     where a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2 and a.Quarter=b.Quarter and a.LOA=b.LOA and a.BE!='Other'")
+#Calculating FINBO Net Deferral BE Percentage
+Netdeferral1$BE_per = Netdeferral1$Netdeferral/Netdeferral1$netdeferral_sl
+Netdeferral_Sl1_Other = sqldf("select LOA,Saleslevel,Saleslevel2,Quarter,sum(Netdeferral) as netdeferral_sl from Netdeferral
+                              group by 1,2,3,4")
+Netdeferral2 = sqldf("select a.*,b.netdeferral_sl from Netdeferral as a,Netdeferral_Sl1_Other as b
+                     where a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2 and a.Quarter=b.Quarter and a.LOA=b.LOA and a.BE='Other'")
+Netdeferral2$Saleslevel2 = 'Non GSP'
+Netdeferral2 = sqldf("select LOA,Saleslevel,Saleslevel2,BE,Quarter,sum(Netdeferral) as Netdeferral,sum(netdeferral_sl) as netdeferral_sl from Netdeferral2
+                     group by 1,2,3,4,5")
+Netdeferral2$BE_per = Netdeferral2$Netdeferral/Netdeferral2$netdeferral_sl
+Netdeferral=rbind(Netdeferral1,Netdeferral2)
+
+#Outlier Treatment
+Netdeferral$group <-paste(Netdeferral$LOA,Netdeferral$Saleslevel,Netdeferral$Saleslevel2,Netdeferral$BE, sep = "")
+
+Final <- data.frame()
+
+P <- unique(Netdeferral$group)
+
+for (i in 1:length(P)) { 
+  temp <- Netdeferral [Netdeferral$group==P[i],]
+  temp$Upper_limit <- quantile(temp$BE_per,0.75)+ ( IQR(temp$BE_per)*1.5)
+  temp$Lower_limit <- quantile(temp$BE_per,0.25)- ( IQR(temp$BE_per)*1.5)
+  Final <- rbind(Final,temp)
+}
+
+Final$BE_per_capped<- ifelse(Final$BE_per< Final$Lower_limit, Final$Lower_limit,ifelse(Final$BE_per> Final$Upper_limit, Final$Upper_limit,Final$BE_per)) 
+
+# Five Quarters BE% Calculation
+ma <- function(arr, n=5){
+  res = arr
+  for(i in n:length(arr)){
+    res[i+1] = mean(arr[(i-n+1):i])
+  }
+  res
+}
+
+Final$MA <- with(Final, ave(BE_per_capped, group, FUN=ma ))
+
+# Hyperion Trend Forecast Import
+TrendForecast=read.table("TBA_MBA_FORECAST_INPUT.txt",header = FALSE, sep = ",")
+TrendForecast = subset(TrendForecast,select= -c(V3,V4))
+TrendForecast <- TrendForecast[c(2,3,1,4,5)]
+names(TrendForecast)[1:5] <- c('Year','Quarter','Saleslevel3','Account','Trend_Forecast')
+
+TrendForecast$Quarter=paste(20,substr(TrendForecast$Year,3,4),TrendForecast$Quarter,sep="")
+TrendForecast$LOA[TrendForecast$Account=="Deferral-Release"]="TBA"
+TrendForecast$LOA[TrendForecast$Account=="DEAL SPECIFIC"]="MBA"
+TrendForecast=sqldf("select a.LOA,a.Saleslevel3,a.Quarter,a.Trend_Forecast,b.Saleslevel2,b.Saleslevel1
+                    from TrendForecast as a,SL2_Mapping as b  where a.Saleslevel3=b.Saleslevel3")
+TrendForecast=sqldf("select LOA,Saleslevel1,Saleslevel2,Saleslevel3,Quarter,sum(Trend_Forecast) as Trend_Forecast
+                    from TrendForecast group by 1,2,3,4,5")
+TrendForecast_sl1 = sqldf("select LOA,Saleslevel1,Saleslevel2,Quarter,sum(Trend_Forecast) as Trend_Forecast_sl from TrendForecast
+                          group by 1,2,3,4")
+TrendForecast = sqldf("select a.*,b.Trend_Forecast_sl from TrendForecast as a,TrendForecast_sl1 as b
+                      where a.Saleslevel1=b.Saleslevel1 and a.Saleslevel2=b.Saleslevel2 and a.Quarter=b.Quarter and a.LOA=b.LOA")
+TrendForecast$sl_per = TrendForecast$Trend_Forecast/TrendForecast$Trend_Forecast_sl
+
+quarter=unique(TrendForecast$Quarter)
+check <- unique(subset(Final,select=c(LOA,Saleslevel,Saleslevel2,BE)))
+
+check1 <- data.frame()
+for (i in 1:length(quarter)) { 
+  check$Quarter=quarter[i]
+  check1 <- rbind(check,check1) }
+check1$BE_per_capped <- 0
+
+check2 <- subset(Final,select=c(LOA,Saleslevel,Saleslevel2,BE,Quarter,BE_per_capped))
+check2 =check2[!(check2$Quarter %in% Forecast_Quarter),]
+check2 <- rbind(check2,check1)
+check2$group <-paste(check2$LOA,check2$Saleslevel,check2$Saleslevel2,check2$BE, sep = "")
+check2<- check2[with(check2, order(LOA,Saleslevel,Saleslevel2,BE,Quarter)), ]
+check2$MA <- with(check2, ave(BE_per_capped, group, FUN=ma ))
+
+for (i in 1:length(quarter)) { 
+  check2$BE_per_capped= ifelse(check2$Quarter %in% quarter[i], check2$MA,check2$BE_per_capped)
+  check2$MA <- with(check2, ave(BE_per_capped, group, FUN=ma ))
+}
+
+Test =check2[(check2$Quarter %in% quarter),]
+Test <- subset(Test,select=c(LOA,Saleslevel,Saleslevel2,BE,Quarter,MA))
+
+Test$group <-paste(Test$LOA,Test$Saleslevel,Test$Saleslevel2,Test$Quarter, sep = "")
+
+BE_Spread <- data.frame()
+
+P <- unique(Test$group)
+
+for (i in 1:length(P)) { 
+  temp <- Test [Test$group==P[i],]
+  sum <- sum(temp$MA)
+  temp$spread <- temp$MA +(temp$MA/sum)*(1-sum)
+  BE_Spread <- rbind(BE_Spread,temp)
+}
+
+BE_Spread_Final <- sqldf("select a.LOA,a.Saleslevel,a.Saleslevel2,a.BE,a.Quarter,a.spread,b.Saleslevel3,b.Trend_Forecast_sl,b.sl_per
+                         from BE_Spread as a left join TrendForecast as b on a.Saleslevel=b.Saleslevel1 and a.Saleslevel2=b.Saleslevel2
+                         and a.Quarter=b.Quarter and a.LOA=b.LOA")
+
+# Trend Forecast allocation to PF level
+pf = sqldf("select LOA,Quarter,Saleslevel,BE,PF,sum(Netdeferral) as Netdeferral from PF 
+           group by 1,2,3,4,5")
+
+PF_list= read.xlsx("Deferral_Data.xlsx",sheet="PF_list")
+
+PF_list$Quarter=paste(substr(PF_list$FISCAL_YEAR_QUARTER_NUMBER_INT,1,4),"Q",substr(PF_list$FISCAL_YEAR_QUARTER_NUMBER_INT,5,5),sep="")
+pf = sqldf("select a.* from pf as a,PF_list as b where a.Quarter=b.Quarter and a.PF=b.PF")
+pf1 = sqldf("select LOA,Saleslevel,BE,Quarter,sum(Netdeferral) as netdeferral_pf from pf  group by 1,2,3,4")
+pf = sqldf("select a.*,b.netdeferral_pf from pf as a,pf1 as b
+           where a.Saleslevel=b.Saleslevel and a.Quarter=b.Quarter and a.BE=b.BE and a.LOA=b.LOA")
+pf$pf_per = pf$Netdeferral/pf$netdeferral_pf
+
+pf2 <- data.frame()
+for (i in 1:length(quarter)) { 
+  pf$Quarter=quarter[i]
+  pf2 <- rbind(pf,pf2) }
+
+# Spread Hyperion Trend Forecast w.r.t BE and PF
+
+BE_Spread_Final = sqldf("select a.*,b.PF,b.pf_per from BE_Spread_Final as a,pf2 as b 
+                        where a.Saleslevel=b.Saleslevel and a.Quarter=b.Quarter and a.BE=b.BE and a.LOA=b.LOA")
+
+BE_Spread_Final$pf_per[BE_Spread_Final$pf_per == "Inf"] <- 0
+BE_Spread_Final$pf_per[BE_Spread_Final$pf_per == "-Inf"] <- 0
+
+BE_Spread_Final <- unique(BE_Spread_Final)
+
+BE_Spread_Final$stat_Forecast1 <- BE_Spread_Final$spread*BE_Spread_Final$sl_per*BE_Spread_Final$pf_per*BE_Spread_Final$Trend_Forecast_sl
+
+BE_Spread_Final_sl <- sqldf("select LOA,Saleslevel,Saleslevel2,Quarter,sum(stat_Forecast1) as stat_Forecast_sl from BE_Spread_Final
+                            group by 1,2,3,4")
+BE_Spread_Final <- sqldf("select a.*,b.stat_Forecast_sl from BE_Spread_Final as a,BE_Spread_Final_sl as b
+                         where a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2 and a.Quarter=b.Quarter and a.LOA=b.LOA")
+BE_Spread_Final$stat_Forecast <- (BE_Spread_Final$stat_Forecast1/BE_Spread_Final$stat_Forecast_sl)*BE_Spread_Final$Trend_Forecast_sl
+
+BE_Spread_Final <- unique(BE_Spread_Final)
+
+Final_Result_Month <- sqldf("select LOA,Saleslevel,Saleslevel3 as Saleslevel2,PF,BE,Quarter,stat_Forecast
+                            from BE_Spread_Final")
+
+BE_Spread_Final = subset(BE_Spread_Final,select= -c(Saleslevel2))
+names(BE_Spread_Final)[names(BE_Spread_Final) == 'Saleslevel3'] <- 'Saleslevel2'
+PF = subset(PF,select= -c(Saleslevel2))
+names(PF)[names(PF) == 'Saleslevel3'] <- 'Saleslevel2'
+
+# If all 3 Months Open
+if(Month=="AUG"|Month=="NOV"|Month=="FEB"|Month=="MAY" ){
+  test=Final_Result_Month[Final_Result_Month$Quarter %in% Forecast_Quarter,]
+  test$M1 <- test$stat_Forecast * (4/13)
+  test$M2 <- test$stat_Forecast * (4/13)
+  test$M3 <- test$stat_Forecast * (5/13)
+  Final_Result_Month1 =unique(test)
+  
+}
+
+# If only M1 closed
+
+if(Month=="SEP"|Month=="DEC"|Month=="MAR"|Month=="JUN" ){
+  PF1 =PF[PF$Quarter %in% Forecast_Quarter,]
+  pf_month = subset(PF1,substr(period,5,6)=="01"|substr(period,5,6)=="04"|substr(period,5,6)=="07"|substr(period,5,6)=="10")
+  test=  Final_Result_Month[Final_Result_Month$Quarter %in% Forecast_Quarter,]
+  Final_Result_Month1=sqldf("select a.*,b.Netdeferral as M1 from test as a
+                            left join pf_month as b on a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2
+                            and a.BE=b.BE and a.PF=b.PF and a.LOA=b.LOA")
+  
+  Final_Result_Month1$M1[is.na(Final_Result_Month1$M1)]=0
+  month1 <- sqldf("select a.*,b.stat_Forecast from pf_month as a
+                  left join test as b on a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2
+                  and a.BE=b.BE and a.PF=b.PF and a.LOA=b.LOA")
+  month1$stat_Forecast[is.na(month1$stat_Forecast)] <- 0
+  month1 = subset(month1,stat_Forecast==0)
+  month1 = subset(month1,select= -c(period))
+  names(month1)[names(month1) == 'Netdeferral'] <- 'M1'
+  month1 <- month1[c(8,2,3,5,4,1,7,6)]
+  Final_Result_Month1 <- rbind(Final_Result_Month1,month1)
+  
+  
+  Final_Result_Month1$M2= (Final_Result_Month1$stat_Forecast -Final_Result_Month1$M1)/2
+  Final_Result_Month1$M3= (Final_Result_Month1$stat_Forecast -Final_Result_Month1$M1)/2
+  
+  Final_Result_Month1 =unique(Final_Result_Month1)
+  WW1 =WW[WW$Quarter %in% Forecast_Quarter,]
+  WW_month = subset(WW1,substr(period,5,6)=="01"|substr(period,5,6)=="04"|substr(period,5,6)=="07"|substr(period,5,6)=="10")
+  WW_month = subset(WW_month,select= -c(period))
+  names(WW_month)[names(WW_month) == 'Netdeferral'] <- 'M1'
+  WW_month$M2=-(WW_month$M1/2)
+  WW_month$M3=-(WW_month$M1/2)
+  WW_month$stat_Forecast=0 
+  WW_month <- WW_month[,c(8,1,2,3,4,5,10,7,9,6)]
+  Final_Result_Month1 <- rbind(Final_Result_Month1,WW_month)
+  #Final_Result_Month1 <-Final_Result_Month1
+}
+
+# If M1  and M2 are closed
+
+if(Month=="OCT"|Month=="JAN"|Month=="APR"|Month=="JUL" ){
+  PF1 =PF[PF$Quarter %in% Forecast_Quarter,]
+  test=  Final_Result_Month[Final_Result_Month$Quarter %in% Forecast_Quarter,]
+  pf_month = subset(PF1,substr(period,5,6)=="01"|substr(period,5,6)=="02"|substr(period,5,6)=="04"|substr(period,5,6)=="05"|
+                      substr(period,5,6)=="07"|substr(period,5,6)=="08"|substr(period,5,6)=="10"|substr(period,5,6)=="11")
+  pf_month1<- cast(pf_month, LOA+Quarter+Saleslevel+Saleslevel2+BE+PF ~ period, value = 'Netdeferral')
+  pf_month1[is.na(pf_month1)]=0
+  names(pf_month1)[substr(names(pf_month1),5,6) == '01'|substr(names(pf_month1),5,6) == '04'|substr(names(pf_month1),5,6) == '07'|substr(names(pf_month1),5,6) == '10'] <- 'M1'
+  names(pf_month1)[substr(names(pf_month1),5,6) == '02'|substr(names(pf_month1),5,6) == '05'|substr(names(pf_month1),5,6) == '08'|substr(names(pf_month1),5,6) == '11'] <- 'M2'
+  Final_Result_Month1=sqldf("select a.*,b.M1,b.M2 from test as a
+                            left join pf_month1 as b on a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2
+                            and a.BE=b.BE and a.PF=b.PF and a.LOA=b.LOA")
+  Final_Result_Month1[is.na(Final_Result_Month1)]=0
+  month1 <- sqldf("select a.*,b.stat_Forecast from pf_month1 as a
+                  left join test as b on a.Saleslevel=b.Saleslevel and a.Saleslevel2=b.Saleslevel2
+                  and a.BE=b.BE and a.PF=b.PF and a.LOA=b.LOA")
+  month1$stat_Forecast[is.na(month1$stat_Forecast)] <- 0
+  month1 = subset(month1,stat_Forecast==0)
+  month1 <- month1[c(1,3,4,6,5,2,9,7,8)]
+  
+  Final_Result_Month1 <- rbind(Final_Result_Month1,month1)
+  
+  Final_Result_Month1$M3= Final_Result_Month1$stat_Forecast -Final_Result_Month1$M1-Final_Result_Month1$M2
+  
+  Final_Result_Month1 =unique(Final_Result_Month1)
+  Final_Result_Month1 <- Final_Result_Month1
+  Final_Result_Month1[is.na(Final_Result_Month1)]=0
+  
+  WW1 =WW[WW$Quarter %in% Forecast_Quarter,]
+  WW_month = subset(WW1,substr(period,5,6)=="01"|substr(period,5,6)=="02"|substr(period,5,6)=="04"|substr(period,5,6)=="05"|
+                      substr(period,5,6)=="07"|substr(period,5,6)=="08"|substr(period,5,6)=="10"|substr(period,5,6)=="11")
+  WW_month1<- cast(WW_month, LOA+Quarter+Saleslevel+Saleslevel2+BE+PF ~ period,value = 'Netdeferral')
+  WW_month1[is.na(WW_month1)]=0
+  names(WW_month1)[substr(names(WW_month1),5,6) == '01'|substr(names(WW_month1),5,6) == '04'|substr(names(WW_month1),5,6) == '07'|substr(names(WW_month1),5,6) == '10'] <- 'M1'
+  names(WW_month1)[substr(names(WW_month1),5,6) == '02'|substr(names(WW_month1),5,6) == '05'|substr(names(WW_month1),5,6) == '08'|substr(names(WW_month1),5,6) == '11'] <- 'M2'
+  WW_month1$M3=-(WW_month1$M1+WW_month1$M2) 
+  WW_month1$stat_Forecast=0
+  Final_Result_Month1 <- smartbind(Final_Result_Month1,WW_month1)
+  Final_Result_Month1[is.na(Final_Result_Month1)]=0
+}
+
+test=Final_Result_Month[!(Final_Result_Month$Quarter %in% Forecast_Quarter),]
+test$M1 <- test$stat_Forecast * (4/13)
+test$M2 <- test$stat_Forecast * (4/13)
+test$M3 <- test$stat_Forecast * (5/13)
+Final_Result_Month2 =unique(test)
+Final_Result_Month =rbind(Final_Result_Month1,Final_Result_Month2)
+Final_Result_Month =subset(Final_Result_Month,select=-c(stat_Forecast))
+Final_Result_Month =reshape(Final_Result_Month, direction='long', varying=c('M1', 'M2', 'M3'), 
+                            timevar='Month',times=c('M1', 'M2', 'M3'),v.names=c('stat_Forecast'))
+
+Final_Result_Month$year = paste("FY",substr(Final_Result_Month$Quarter,3,4),sep="")
+Final_Result_Month$quar = substr(Final_Result_Month$Quarter,5,6)
+
+Final_Result_Month$Fiscal_Month<-ifelse(Final_Result_Month$quar=='Q1'& Final_Result_Month$Month=='M1', "Aug"
+                                        ,ifelse(Final_Result_Month$quar=='Q1'& Final_Result_Month$Month=='M2', "Sep"
+                                                ,ifelse(Final_Result_Month$quar=='Q1'& Final_Result_Month$Month=='M3', "Oct"
+                                                        ,ifelse(Final_Result_Month$quar=='Q2'& Final_Result_Month$Month=='M1', "Nov"
+                                                                ,ifelse(Final_Result_Month$quar=='Q2'& Final_Result_Month$Month=='M2', "Dec"
+                                                                        ,ifelse(Final_Result_Month$quar=='Q2'& Final_Result_Month$Month=='M3', "Jan"           
+                                                                                ,ifelse(Final_Result_Month$quar=='Q3'& Final_Result_Month$Month=='M1', "Feb"
+                                                                                        ,ifelse(Final_Result_Month$quar=='Q3'& Final_Result_Month$Month=='M2', "Mar"
+                                                                                                ,ifelse(Final_Result_Month$quar=='Q3'& Final_Result_Month$Month=='M3', "Apr"            
+                                                                                                        ,ifelse(Final_Result_Month$quar=='Q4'& Final_Result_Month$Month=='M1', "May"
+                                                                                                                ,ifelse(Final_Result_Month$quar=='Q4'& Final_Result_Month$Month=='M2', "Jun","Jul")))))))))))
+
+Final_Result_Month$Account[Final_Result_Month$LOA=="TBA"]="Deferral-Release"
+Final_Result_Month$Account[Final_Result_Month$LOA=="MBA"]="DEAL SPECIFIC"
+Final_Result_Month = subset(Final_Result_Month,select= -c(LOA))
+
+Output= sqldf("select Saleslevel2,PF,year,Account,Fiscal_Month,sum(stat_Forecast) as Amount
+              from Final_Result_Month group by 1,2,3,4,5")
+names(Output)[names(Output) == 'Fiscal_Month'] <- 'Month'
+Output= subset(Output,Amount!=0)
+write.xlsx(Output,"Output.xlsx") 
+Final_Result_Month= subset(Final_Result_Month,stat_Forecast!=0)
+write.xlsx(Final_Result_Month,"Final_Result_Month_TBAMBA.xlsx") 
+write.table(Output,"TBA_MBA_FORECAST_OUTPUT.txt",row.names = FALSE,sep = ",")
+
+
+Validation=Final_Result_Month
+Validation_total=sqldf("select Account,Quarter,sum(stat_Forecast) as stat_Forecast from Validation
+                       group by 1,2")
+Validation_sl2=sqldf("select Account,Quarter,Saleslevel2,sum(stat_Forecast) as stat_Forecast from Validation
+                     group by 1,2,3")
+Validation =Validation[(Validation$Quarter %in% Forecast_Quarter),]
+
+Validation=sqldf("select Account,BE,Quarter,sum(stat_Forecast) as stat_Forecast from Validation
+                 group by 1,2,3 order by 1 desc")
+TrendForecast=read.table("TBA_MBA_FORECAST_INPUT.txt",header = FALSE, sep = ",")
+TrendForecast = subset(TrendForecast,select= -c(V3,V4))
+TrendForecast <- TrendForecast[c(2,3,1,4,5)]
+names(TrendForecast)[1:5] <- c('Year','Quarter','Saleslevel2','Account','Trend_Forecast')
+TrendForecast$Quarter=paste(20,substr(TrendForecast$Year,3,4),TrendForecast$Quarter,sep="")
+TrendForecast_sl2=sqldf("select Account,Quarter,Saleslevel2,sum(Trend_Forecast) as Trend_Forecast from TrendForecast
+                        group by 1,2,3")
+val_check_sl2 = sqldf("select a.*,b.stat_Forecast from TrendForecast_sl2 as a,Validation_sl2 as b
+                      where a.Account=b.Account and a.Quarter=b.Quarter and a.Saleslevel2=b.Saleslevel2 ")
+val_check_sl2$delta = val_check_sl2$Trend_Forecast-val_check_sl2$stat_Forecast
+
+TrendForecast=sqldf("select Account,Quarter,sum(Trend_Forecast) as Trend_Forecast from TrendForecast
+                    group by 1,2")
+
+val_Check = sqldf("select a.*,b.stat_Forecast from TrendForecast as a,Validation_total as b
+                  where a.Account=b.Account and a.Quarter=b.Quarter ")
+val_Check$delta = val_Check$Trend_Forecast-val_Check$stat_Forecast
+
+list_of_datasets <- list("Hyperion vs Stat model_Quarter"=val_Check,"Hyperion vs Stat model_Sl2" = val_check_sl2,"Stat model_BE" = Validation)
+write.xlsx(list_of_datasets, file = "Validation.xlsx")
